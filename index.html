@@ -530,9 +530,57 @@
         <div class="users-list" id="usersList"></div>
     </div>
 
-    <script>
+    <!-- Firebase v10 SDKs from CDN -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { 
+            getFirestore, 
+            doc, 
+            setDoc, 
+            getDoc, 
+            getDocs, 
+            updateDoc, 
+            deleteDoc, 
+            collection, 
+            onSnapshot 
+        } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        // =========================================================================
+        // FIREBASE CONFIGURATION
+        // =========================================================================
+        // Replace the placeholders below with your actual Firebase project keys
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        // Initialize Firebase & Firestore
+        let app, db;
+        let isFirebaseEnabled = false;
+
+        try {
+            // Check if config has placeholders or real keys
+            if (firebaseConfig.apiKey !== "YOUR_API_KEY" && firebaseConfig.projectId !== "YOUR_PROJECT_ID") {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                isFirebaseEnabled = true;
+                console.log("Firebase Firestore initialized successfully.");
+            } else {
+                console.warn("Firebase config is using default placeholder keys. Falling back to Local Storage mode.");
+            }
+        } catch (e) {
+            console.error("Firebase initialization failed, falling back to Local Storage mode:", e);
+        }
+
         // ADMIN PASSWORD (Change this to your desired password)
         const ADMIN_PASSWORD = "salon123";
+
+        // Global unsubscribe handler for the active customer snapshot listener
+        let unsubscribeUserListener = null;
 
         // Initialize
         function init() {
@@ -601,7 +649,36 @@
             
             const email = localStorage.getItem('current_user');
             document.getElementById('displayEmail').innerText = email;
-            updateCardDisplay();
+            
+            // Clean up any existing listeners before attaching a new one
+            if (unsubscribeUserListener) {
+                unsubscribeUserListener();
+                unsubscribeUserListener = null;
+            }
+
+            if (isFirebaseEnabled) {
+                // Listen to database changes in real-time
+                const userDocRef = doc(db, 'customers', email);
+                unsubscribeUserListener = onSnapshot(userDocRef, (docSnap) => {
+                    if (docSnap.exists()) {
+                        const userData = docSnap.data();
+                        updateCardDisplay(userData.stamps || 0);
+                    } else {
+                        // User has been deleted by admin, log out
+                        logout();
+                    }
+                }, (error) => {
+                    console.error("Firestore listener failed, using local storage fallback:", error);
+                    fallbackCardDisplay(email);
+                });
+            } else {
+                fallbackCardDisplay(email);
+            }
+        }
+
+        function fallbackCardDisplay(email) {
+            const stamps = parseInt(localStorage.getItem(`stamps_${email}`)) || 0;
+            updateCardDisplay(stamps);
         }
 
         function showAdminDashboard() {
@@ -612,8 +689,8 @@
             displayAllUsers();
         }
 
-        function createAccount() {
-            const email = document.getElementById('emailInput').value.trim();
+        async function createAccount() {
+            const email = document.getElementById('emailInput').value.trim().toLowerCase();
             const errorDiv = document.getElementById('signupError');
 
             if (!email) {
@@ -626,32 +703,59 @@
                 return;
             }
 
-            // Get all users
-            let users = JSON.parse(localStorage.getItem('all_users')) || {};
+            if (isFirebaseEnabled) {
+                try {
+                    const userDocRef = doc(db, 'customers', email);
+                    const userDoc = await getDoc(userDocRef);
 
-            if (users[email]) {
-                errorDiv.innerText = 'This email already has a card! Use "My Card" tab to login.';
-                return;
+                    if (userDoc.exists()) {
+                        errorDiv.innerText = 'This email already has a card! Use "My Card" tab to login.';
+                        return;
+                    }
+
+                    // Create new user in Firestore
+                    await setDoc(userDocRef, {
+                        email: email,
+                        stamps: 0,
+                        createdAt: new Date().toLocaleString()
+                    });
+
+                    localStorage.setItem('current_user', email);
+                    document.getElementById('emailInput').value = '';
+                    errorDiv.innerText = '';
+                    showLoyaltyCard();
+                } catch (e) {
+                    console.error("Error creating card in Firestore:", e);
+                    errorDiv.innerText = 'Database error: ' + e.message;
+                }
+            } else {
+                // Get all users from local storage
+                let users = JSON.parse(localStorage.getItem('all_users')) || {};
+
+                if (users[email]) {
+                    errorDiv.innerText = 'This email already has a card! Use "My Card" tab to login.';
+                    return;
+                }
+
+                // Create new user locally
+                users[email] = {
+                    email: email,
+                    stamps: 0,
+                    createdAt: new Date().toLocaleString()
+                };
+
+                localStorage.setItem('all_users', JSON.stringify(users));
+                localStorage.setItem('current_user', email);
+                localStorage.setItem(`stamps_${email}`, '0');
+
+                document.getElementById('emailInput').value = '';
+                errorDiv.innerText = '';
+                showLoyaltyCard();
             }
-
-            // Create new user
-            users[email] = {
-                email: email,
-                stamps: 0,
-                createdAt: new Date().toLocaleString()
-            };
-
-            localStorage.setItem('all_users', JSON.stringify(users));
-            localStorage.setItem('current_user', email);
-            localStorage.setItem(`stamps_${email}`, '0');
-
-            document.getElementById('emailInput').value = '';
-            errorDiv.innerText = '';
-            showLoyaltyCard();
         }
 
-        function loginUser() {
-            const email = document.getElementById('loginEmailInput').value.trim();
+        async function loginUser() {
+            const email = document.getElementById('loginEmailInput').value.trim().toLowerCase();
             const errorDiv = document.getElementById('loginError');
 
             if (!email) {
@@ -664,22 +768,45 @@
                 return;
             }
 
-            // Get all users
-            let users = JSON.parse(localStorage.getItem('all_users')) || {};
+            if (isFirebaseEnabled) {
+                try {
+                    const userDocRef = doc(db, 'customers', email);
+                    const userDoc = await getDoc(userDocRef);
 
-            if (!users[email]) {
-                errorDiv.innerText = 'No card found for this email. Create a new card?';
-                return;
+                    if (!userDoc.exists()) {
+                        errorDiv.innerText = 'No card found for this email. Create a new card?';
+                        return;
+                    }
+
+                    localStorage.setItem('current_user', email);
+                    document.getElementById('loginEmailInput').value = '';
+                    errorDiv.innerText = '';
+                    showLoyaltyCard();
+                } catch (e) {
+                    console.error("Error logging in with Firestore:", e);
+                    errorDiv.innerText = 'Database error: ' + e.message;
+                }
+            } else {
+                // Get all users from local storage
+                let users = JSON.parse(localStorage.getItem('all_users')) || {};
+
+                if (!users[email]) {
+                    errorDiv.innerText = 'No card found for this email. Create a new card?';
+                    return;
+                }
+
+                localStorage.setItem('current_user', email);
+                document.getElementById('loginEmailInput').value = '';
+                errorDiv.innerText = '';
+                showLoyaltyCard();
             }
-
-            // Login successful
-            localStorage.setItem('current_user', email);
-            document.getElementById('loginEmailInput').value = '';
-            errorDiv.innerText = '';
-            showLoyaltyCard();
         }
 
         function logout() {
+            if (unsubscribeUserListener) {
+                unsubscribeUserListener();
+                unsubscribeUserListener = null;
+            }
             localStorage.removeItem('current_user');
             showLoginContainer();
             document.getElementById('emailInput').value = '';
@@ -709,71 +836,150 @@
             document.getElementById('adminLoginError').innerText = '';
         }
 
-        function displayAllUsers() {
-            const users = JSON.parse(localStorage.getItem('all_users')) || {};
+        async function displayAllUsers() {
             const usersList = document.getElementById('usersList');
             usersList.innerHTML = '';
 
-            if (Object.keys(users).length === 0) {
-                usersList.innerHTML = '<p>No customers yet</p>';
-                return;
-            }
+            if (isFirebaseEnabled) {
+                try {
+                    const querySnapshot = await getDocs(collection(db, 'customers'));
+                    
+                    if (querySnapshot.empty) {
+                        usersList.innerHTML = '<p>No customers in database yet</p>';
+                        return;
+                    }
 
-            Object.keys(users).forEach(email => {
-                const user = users[email];
-                const stamps = parseInt(localStorage.getItem(`stamps_${email}`)) || 0;
+                    querySnapshot.forEach(docSnap => {
+                        const email = docSnap.id;
+                        const user = docSnap.data();
+                        const stamps = user.stamps || 0;
+                        const createdAt = user.createdAt || "Unknown";
 
-                const userItem = document.createElement('div');
-                userItem.className = 'user-item';
-                userItem.innerHTML = `
-                    <div class="user-item-info">
-                        <div class="user-item-email">${email}</div>
-                        <div class="user-item-stamps">Stamps: ${stamps}/4 | Joined: ${user.createdAt}</div>
-                    </div>
-                    <div class="user-item-buttons">
-                        <button class="stamp-btn" onclick="adminAddStamp('${email}')">+ Add Stamp</button>
-                        <button class="clear-btn" onclick="adminClearStamps('${email}')">Clear Stamps</button>
-                        <button class="remove-btn" onclick="removeUser('${email}')">Remove</button>
-                    </div>
-                `;
-                usersList.appendChild(userItem);
-            });
-        }
-
-        function adminAddStamp(email) {
-            let users = JSON.parse(localStorage.getItem('all_users')) || {};
-            let stamps = parseInt(localStorage.getItem(`stamps_${email}`)) || 0;
-
-            if (stamps < 4) {
-                stamps++;
-                localStorage.setItem(`stamps_${email}`, stamps.toString());
-                displayAllUsers();
+                        const userItem = document.createElement('div');
+                        userItem.className = 'user-item';
+                        userItem.innerHTML = `
+                            <div class="user-item-info">
+                                <div class="user-item-email">${email}</div>
+                                <div class="user-item-stamps">Stamps: ${stamps}/4 | Joined: ${createdAt}</div>
+                            </div>
+                            <div class="user-item-buttons">
+                                <button class="stamp-btn" onclick="adminAddStamp('${email}')">+ Add Stamp</button>
+                                <button class="clear-btn" onclick="adminClearStamps('${email}')">Clear Stamps</button>
+                                <button class="remove-btn" onclick="removeUser('${email}')">Remove</button>
+                            </div>
+                        `;
+                        usersList.appendChild(userItem);
+                    });
+                } catch (e) {
+                    console.error("Error fetching customers from Firestore:", e);
+                    usersList.innerHTML = `<p class="error-message">Database error: ${e.message}</p>`;
+                }
             } else {
-                alert('Card is already full!');
+                // Fallback to local storage
+                const users = JSON.parse(localStorage.getItem('all_users')) || {};
+
+                if (Object.keys(users).length === 0) {
+                    usersList.innerHTML = '<p>No customers yet (Local Storage Mode)</p>';
+                    return;
+                }
+
+                Object.keys(users).forEach(email => {
+                    const user = users[email];
+                    const stamps = parseInt(localStorage.getItem(`stamps_${email}`)) || 0;
+
+                    const userItem = document.createElement('div');
+                    userItem.className = 'user-item';
+                    userItem.innerHTML = `
+                        <div class="user-item-info">
+                            <div class="user-item-email">${email}</div>
+                            <div class="user-item-stamps">Stamps: ${stamps}/4 | Joined: ${user.createdAt} (Local)</div>
+                        </div>
+                        <div class="user-item-buttons">
+                            <button class="stamp-btn" onclick="adminAddStamp('${email}')">+ Add Stamp</button>
+                            <button class="clear-btn" onclick="adminClearStamps('${email}')">Clear Stamps</button>
+                            <button class="remove-btn" onclick="removeUser('${email}')">Remove</button>
+                        </div>
+                    `;
+                    usersList.appendChild(userItem);
+                });
             }
         }
 
-        function adminClearStamps(email) {
+        async function adminAddStamp(email) {
+            if (isFirebaseEnabled) {
+                try {
+                    const userDocRef = doc(db, 'customers', email);
+                    const userDoc = await getDoc(userDocRef);
+
+                    if (userDoc.exists()) {
+                        const userData = userDoc.data();
+                        let stamps = userData.stamps || 0;
+
+                        if (stamps < 4) {
+                            stamps++;
+                            await updateDoc(userDocRef, { stamps: stamps });
+                            displayAllUsers();
+                        } else {
+                            alert('Card is already full!');
+                        }
+                    }
+                } catch (e) {
+                    console.error("Error adding stamp in Firestore:", e);
+                    alert('Database error: ' + e.message);
+                }
+            } else {
+                let stamps = parseInt(localStorage.getItem(`stamps_${email}`)) || 0;
+
+                if (stamps < 4) {
+                    stamps++;
+                    localStorage.setItem(`stamps_${email}`, stamps.toString());
+                    displayAllUsers();
+                } else {
+                    alert('Card is already full!');
+                }
+            }
+        }
+
+        async function adminClearStamps(email) {
             if (confirm(`Clear all stamps for ${email}?`)) {
-                localStorage.setItem(`stamps_${email}`, '0');
-                displayAllUsers();
+                if (isFirebaseEnabled) {
+                    try {
+                        const userDocRef = doc(db, 'customers', email);
+                        await updateDoc(userDocRef, { stamps: 0 });
+                        displayAllUsers();
+                    } catch (e) {
+                        console.error("Error clearing stamps in Firestore:", e);
+                        alert('Database error: ' + e.message);
+                    }
+                } else {
+                    localStorage.setItem(`stamps_${email}`, '0');
+                    displayAllUsers();
+                }
             }
         }
 
-        function removeUser(email) {
+        async function removeUser(email) {
             if (confirm(`Are you sure you want to remove ${email}'s card?`)) {
-                let users = JSON.parse(localStorage.getItem('all_users')) || {};
-                delete users[email];
-                localStorage.setItem('all_users', JSON.stringify(users));
-                localStorage.removeItem(`stamps_${email}`);
-                displayAllUsers();
+                if (isFirebaseEnabled) {
+                    try {
+                        const userDocRef = doc(db, 'customers', email);
+                        await deleteDoc(userDocRef);
+                        displayAllUsers();
+                    } catch (e) {
+                        console.error("Error deleting user in Firestore:", e);
+                        alert('Database error: ' + e.message);
+                    }
+                } else {
+                    let users = JSON.parse(localStorage.getItem('all_users')) || {};
+                    delete users[email];
+                    localStorage.setItem('all_users', JSON.stringify(users));
+                    localStorage.removeItem(`stamps_${email}`);
+                    displayAllUsers();
+                }
             }
         }
 
-        function updateCardDisplay() {
-            const email = localStorage.getItem('current_user');
-            const stamps = parseInt(localStorage.getItem(`stamps_${email}`)) || 0;
-
+        function updateCardDisplay(stamps) {
             for (let i = 1; i <= 4; i++) {
                 const slot = document.getElementById(`slot-${i}`);
                 if (i <= stamps) {
@@ -791,8 +997,23 @@
             }
         }
 
-        // Initialize on page load
-        init();
+        // =========================================================================
+        // WINDOW EXPORTS & EVENT LISTENERS
+        // =========================================================================
+        // Since this script is a module, expose the event handlers to standard HTML
+        window.switchTab = switchTab;
+        window.toggleAdminLogin = toggleAdminLogin;
+        window.createAccount = createAccount;
+        window.loginUser = loginUser;
+        window.logout = logout;
+        window.adminLogin = adminLogin;
+        window.logoutAdmin = logoutAdmin;
+        window.adminAddStamp = adminAddStamp;
+        window.adminClearStamps = adminClearStamps;
+        window.removeUser = removeUser;
+
+        // Run initialization when page loads
+        window.addEventListener('DOMContentLoaded', init);
     </script>
 
 </body>
